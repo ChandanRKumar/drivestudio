@@ -17,6 +17,7 @@ from utils.visualization import get_layout
 from utils.geometry import transform_points
 from utils.camera import get_interp_novel_trajectories
 from utils.misc import export_points_to_ply, import_str
+from models.gaussians.unscented_transform import project_point_fisheye
 
 logger = logging.getLogger()
 
@@ -640,34 +641,44 @@ class DrivingDataset(SceneDataset):
                 # get lidar depth on image plane
                 closest_lidar_idx = self.lidar_source.find_closest_timestep(normed_time)
                 lidar_infos = self.lidar_source.get_lidar_rays(closest_lidar_idx)
-                lidar_points = (
+                lidar_points_world = (
                     lidar_infos["lidar_origins"]
                     + lidar_infos["lidar_viewdirs"] * lidar_infos["lidar_ranges"]
                 )
-                
-                # project lidar points to the image plane
-                if cam.undistort:
-                    new_camera_matrix, _ = cv2.getOptimalNewCameraMatrix(
-                                cam.intrinsics[frame_idx].cpu().numpy(),
-                                cam.distortions[frame_idx].cpu().numpy(),
-                                (cam.WIDTH, cam.HEIGHT),
-                                alpha=1,
-                            )
-                    intrinsic_4x4 = torch.nn.functional.pad(
-                            torch.from_numpy(new_camera_matrix), (0, 1, 0, 1)
-                        ).to(self.device)
+
+                if cam.camera_type == "fisheye":
+                    # Transform points to camera coordinates
+                    w2c = cam.cam_to_worlds[frame_idx].inverse()
+                    lidar_points_cam = transform_points(lidar_points_world, w2c)
+
+                    # Project points using fisheye model
+                    cam_points = project_point_fisheye(lidar_points_cam, cam)
+                    depth = lidar_points_cam[:, 2]
                 else:
-                    intrinsic_4x4 = torch.nn.functional.pad(
-                        cam.intrinsics[frame_idx], (0, 1, 0, 1)
-                    )
-                intrinsic_4x4[3, 3] = 1.0
-                lidar2img = intrinsic_4x4 @ cam.cam_to_worlds[frame_idx].inverse()
-                lidar_points = (
-                    lidar2img[:3, :3] @ lidar_points.T + lidar2img[:3, 3:4]
-                ).T # (num_pts, 3)
-                
-                depth = lidar_points[:, 2]
-                cam_points = lidar_points[:, :2] / (depth.unsqueeze(-1) + 1e-6) # (num_pts, 2)
+                    # project lidar points to the image plane
+                    if cam.undistort:
+                        new_camera_matrix, _ = cv2.getOptimalNewCameraMatrix(
+                                    cam.intrinsics[frame_idx].cpu().numpy(),
+                                    cam.distortions[frame_idx].cpu().numpy(),
+                                    (cam.WIDTH, cam.HEIGHT),
+                                    alpha=1,
+                                )
+                        intrinsic_4x4 = torch.nn.functional.pad(
+                                torch.from_numpy(new_camera_matrix), (0, 1, 0, 1)
+                            ).to(self.device)
+                    else:
+                        intrinsic_4x4 = torch.nn.functional.pad(
+                            cam.intrinsics[frame_idx], (0, 1, 0, 1)
+                        )
+                    intrinsic_4x4[3, 3] = 1.0
+                    lidar2img = intrinsic_4x4 @ cam.cam_to_worlds[frame_idx].inverse()
+                    lidar_points_cam = (
+                        lidar2img[:3, :3] @ lidar_points_world.T + lidar2img[:3, 3:4]
+                    ).T # (num_pts, 3)
+
+                    depth = lidar_points_cam[:, 2]
+                    cam_points = lidar_points_cam[:, :2] / (depth.unsqueeze(-1) + 1e-6) # (num_pts, 2)
+
                 valid_mask = (
                     (cam_points[:, 0] >= 0)
                     & (cam_points[:, 0] < cam.WIDTH)

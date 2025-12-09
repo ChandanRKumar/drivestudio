@@ -14,6 +14,7 @@ from tqdm import tqdm, trange
 from datasets.base.scene_dataset import ModelType
 from datasets.base.lidar_source import SceneLidarSource
 from datasets.base.pixel_source import CameraData, ScenePixelSource
+from datasets.base.camera_models import Camera, FisheyeCamera
 
 logger = logging.getLogger()
 
@@ -64,10 +65,10 @@ OPENCV2DATASET = np.array(
 # 4: CAM_BACK_RIGHT
 # 5: CAM_BACK
 AVAILABLE_CAM_LIST = [0, 1, 2, 3, 4, 5]
-        
 class NuScenesCameraData(CameraData):
-    def __init__(self, **kwargs):
+    def __init__(self, camera_type="pinhole", **kwargs):
         super().__init__(**kwargs)
+        self.camera_type = camera_type
         
     def load_calibrations(self):
         cam_to_worlds, intrinsics, distortions = [], [], []
@@ -113,7 +114,17 @@ class NuScenesCameraData(CameraData):
         self.intrinsics = torch.from_numpy(np.stack(intrinsics, axis=0)).float()
         self.distortions = torch.from_numpy(np.stack(distortions, axis=0)).float()
         self.cam_to_worlds = torch.from_numpy(np.stack(cam_to_worlds, axis=0)).float()
+
+class NuScenesFisheyeCameraData(NuScenesCameraData, FisheyeCamera):
+    def __init__(self, camera_type="fisheye", **kwargs):
+        super().__init__(camera_type=camera_type, **kwargs)
         
+    def load_calibrations(self):
+        super().load_calibrations()
+        if "distortion_params" in self.data_cfg:
+            distortion_params = torch.tensor(self.data_cfg.distortion_params)
+            self.distortions = distortion_params.repeat(len(self.cam_to_worlds), 1)
+
     @classmethod
     def get_camera2worlds(cls, data_path: str, cam_id: str, start_timestep: int, end_timestep: int) -> torch.Tensor:
         """
@@ -173,7 +184,15 @@ class NuScenesPixelSource(ScenePixelSource):
         
         for idx, cam_id in enumerate(self.camera_list):
             logger.info(f"Loading camera {cam_id}")
-            camera = NuScenesCameraData(
+            camera_type = self.data_cfg.get("camera_type", "pinhole")
+            if camera_type == "pinhole":
+                camera_class = NuScenesCameraData
+            elif camera_type == "fisheye":
+                camera_class = NuScenesFisheyeCameraData
+            else:
+                raise ValueError(f"Unknown camera type: {camera_type}")
+
+            camera = camera_class(
                 dataset_name=self.dataset_name,
                 data_path=self.data_path,
                 cam_id=cam_id,

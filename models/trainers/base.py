@@ -17,7 +17,8 @@ from torchmetrics.image import PeakSignalNoiseRatio
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
 from models.gaussians.basics import *
-
+from models.gaussians.unscented_transform import unscented_transform
+from diff_gaussian_rasterization import GaussianRasterizer, GaussianRasterizationSettings
 logger = logging.getLogger()
 
 class GSModelType(IntEnum):
@@ -334,7 +335,8 @@ class BasicTrainer(nn.Module):
             camtoworlds_gt=camtoworlds_gt,
             Ks=camera_infos["intrinsics"],
             H=camera_infos["height"],
-            W=camera_infos["width"]
+            W=camera_infos["width"],
+            camera_type=camera_infos.get("camera_type", "pinhole")
         )
         
         return camera_dict
@@ -388,7 +390,64 @@ class BasicTrainer(nn.Module):
         cam: dataclass_camera,
         **kwargs,
     ) -> Dict[str, torch.Tensor]:
-    
+        if cam.camera_type == "fisheye":
+            # Fisheye rendering path
+
+            # Calculate the 3D covariance matrix from scales and rotations
+            scales = gs.scales
+            quats = gs.quats
+
+            R = torch.nn.functional.normalize(quats)
+            R = torch.stack([
+                1 - 2 * (R[:, 2]**2 + R[:, 3]**2), 2 * (R[:, 1] * R[:, 2] - R[:, 0] * R[:, 3]), 2 * (R[:, 1] * R[:, 3] + R[:, 0] * R[:, 2]),
+                2 * (R[:, 1] * R[:, 2] + R[:, 0] * R[:, 3]), 1 - 2 * (R[:, 1]**2 + R[:, 3]**2), 2 * (R[:, 2] * R[:, 3] - R[:, 0] * R[:, 1]),
+                2 * (R[:, 1] * R[:, 3] - R[:, 0] * R[:, 2]), 2 * (R[:, 2] * R[:, 3] + R[:, 0] * R[:, 1]), 1 - 2 * (R[:, 1]**2 + R[:, 2]**2)
+            ], dim=1).view(-1, 3, 3)
+
+            S = torch.diag_embed(scales)
+
+            covariances = R @ S @ R.transpose(1, 2)
+
+            projected_means, projected_covariances = unscented_transform(gs.means, covariances, cam)
+
+            raster_settings = GaussianRasterizationSettings(
+                image_height=cam.H,
+                image_width=cam.W,
+                tanfovx=0,  # Not used in our case
+                tanfovy=0,  # Not used in our case
+                bg=self.back_color,
+                scale_modifier=1.0,
+                viewmatrix=torch.linalg.inv(cam.camtoworlds),
+                projmatrix=torch.eye(4), # The projection is already done
+                sh_degree=0,
+                campos=cam.camtoworlds[:3, 3],
+                prefiltered=False,
+                debug=False
+            )
+
+            rasterizer = GaussianRasterizer(raster_settings=raster_settings)
+
+            rendered_image, radii = rasterizer(
+                means2D=projected_means,
+                means3D=gs.means,
+                shs=None,
+                colors_precomp=gs.rgbs,
+                opacities=gs.opacities,
+                scales=None, # Not used in our case
+                rotations=None, # Not used in our case
+                cov3D_precomp=projected_covariances
+            )
+
+            # Compute the opacity map from the radii
+            opacity = radii.sum(dim=0) > 0
+
+            results = {
+                "rgb_gaussians": rendered_image,
+                "depth": torch.zeros((cam.H, cam.W, 1), device=self.device), # Not yet implemented
+                "opacity": opacity.unsqueeze(-1)
+            }
+            return results, None
+
         def render_fn(opaticy_mask=None, return_info=False):
             renders, alphas, info = rasterization(
                 means=gs.means,

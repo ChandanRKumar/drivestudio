@@ -1,12 +1,4 @@
-# NuScenes dataset configuration
-# Processed cameras:
-#   idx    camera           original size
-#    0    CAM_FRONT         (900, 1600)
-#    1    CAM_FRONT_LEFT    (900, 1600)
-#    2    CAM_FRONT_RIGHT   (900, 1600)
-#    3    CAM_BACK_LEFT     (900, 1600)
-#    4    CAM_BACK_RIGHT    (900, 1600)
-#    5    CAM_BACK          (900, 1600)
+# NuScenes dataset configuration for fisheye cameras
 
 data:
   data_root: data/nuscenes/processed_10Hz/mini # data root for the dataset
@@ -17,9 +9,10 @@ data:
   preload_device: cpu # choose from ["cpu", "cuda"], cache the data on this device
   pixel_source: # image source and object annotations
     type: datasets.nuscenes.nuscenes_sourceloader.NuScenesPixelSource
-    cameras: [0, 1, 2, 3, 4, 5] # which cameras to use
-    camera_type: "pinhole" # camera type: pinhole or fisheye
-    downscale_when_loading: [3, 3, 3, 3, 3, 3] # the size of the images to load
+    cameras: [0] # which cameras to use
+    camera_type: "fisheye" # camera type: pinhole or fisheye
+    distortion_params: [0.1, 0.01, 0.001, 0.0001] # dummy distortion parameters
+    downscale_when_loading: [3] # the size of the images to load
     downscale: 1 # downscale factor wrt to the downscale_when_loading
     undistort: False # whether to undistort the images
     test_image_stride: 0 # use every Nth timestep for the test set. if 0, use all images for training and none for testing
@@ -37,6 +30,6 @@ data:
     # ---- compute aabb from lidar ---- #
     # if load_lidar is True, we compute aabb from lidar, otherwise we compute aabb from cameras
     # 1) downsample lidar by random sampling to 1/lidar_downsample_factor number of points
-    # 2) compute aabb from the downsampled lidar points by using the percentile of lidar_percentiles 
-    lidar_downsample_factor: 4 # downsample lidar by this factor to compute percentile
+    # 2) compute aabb from the downsampled lidar points by using the percentile of lidar_percentiles
+    lidar_downscale_factor: 4 # downsample lidar by this factor to compute percentile
     lidar_percentile: 0.02  # percentile to compute aabb from lidar
